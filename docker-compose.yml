@@ -1,0 +1,54 @@
+version: "3.3"
+services:
+  auth-service-db:
+    image: "cassandra:3.11.6"
+    ports:
+      - "9042:9042"
+      - "9160:9160"
+    container_name: auth-service-db
+    volumes:
+      - cassandra-db:/var/lib/cassandra
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+        reservations:
+          memory: 2048M
+    environment:
+      - JVM_OPTS=-Xms1024M -Xmx1024M
+  auth-service-cassandra-web:
+    image: "markusgulden/cassandra-web:0.5.0"
+    ports:
+      - "9781:3000"
+    container_name: auth-service-cassandra-web
+    depends_on:
+      - "auth-service-db"
+      # - "xgapp"
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+        reservations:
+          memory: 200M
+    entrypoint: sh -c "sleep 30 && cassandra-web --hosts `getent hosts auth-service-db | grep -oP "[0-9.]{7,25}"` --port 9042 --username admin --password admin"
+    environment:
+      - CASSANDRA_HOST_IPS=`dig +short auth-service-db`
+      - CASSANDRA_PORT=9042
+      - CASSANDRA_USERNAME=admin
+      - CASSANDRA_PASSOWRD=admin
+  auth-service:
+    build: .
+    container_name: auth-service
+    depends_on:
+      - "auth-service-db"
+    entrypoint: /root/app -build=xgcompose -cClusterHosts=auth-service-db
+    ports:
+      - "9851:8888"
+    deploy:
+      resources:
+        limits:
+          memory: 500M
+        reservations:
+          memory: 100M   
+volumes:
+  cassandra-db:

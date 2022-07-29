@@ -1,14 +1,17 @@
-package xgservice
+package main
 
 import (
+	"crypto/rand"
 	_ "expvar"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/pprof"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/NYTimes/gziphandler"
@@ -22,10 +25,6 @@ var httpStaticPort *int
 var buildNumber *string
 
 var emptyState map[string]interface{}
-
-var gitRepoURI *string
-var gitRepoUsername *string
-var gitRepoPassword *string
 
 var session *gocql.Session
 
@@ -62,11 +61,6 @@ func runServer() {
 
 	router.POST("/auth/create", createAuth)
 	router.GET("/auth/check", checkAuth)
-
-	router.POST("/repo/files/*filename", uploadFilesMultipart)
-	router.PUT("/repo/files/*filename", uploadFile)
-	router.DELETE("/repo/files/*filename", removeFile)
-	router.GET("/repo/files/*filename", downloadFile)
 
 	router.HandlerFunc(http.MethodGet, "/debug/pprof/", pprof.Index)
 	router.HandlerFunc(http.MethodGet, "/debug/pprof/cmdline", pprof.Cmdline)
@@ -109,24 +103,17 @@ func PrintMemUsage() {
 	fmt.Printf("\tNumGC = %v\n", m.NumGC)
 }
 
-func runStaticServer() {
-	fs := FileServerReact(http.Dir(*staticPath))
-	http.Handle("/", fs)
-
-	log.Println("Listening...")
-	http.ListenAndServe(":"+strconv.Itoa(*httpStaticPort), nil)
-}
-
 func main() {
 	PrintMemUsage()
 	emptyState = make(map[string]interface{})
 	httpPort = flag.Int("port", 8888, "server's HTTP port")
 	strBuildID := string(buildID)
 	buildNumber = flag.String("build", strBuildID, "build number for the health endpoint")
-	repoPath = flag.String("repoPath", "/var/lib/xg-service/repo", "The path of the repository")
 	cClusterHosts := flag.String("cClusterHosts", "localhost", "a cassandra cluster's host name")
-	// cKeySpace := flag.String("cKeyspace", "testing", "a cassandra cluster's keyspace")
 	cPort := flag.Int("cPort", 9042, "a Cassandra cluster's port")
+	baseSalt = flag.String("baseSalt", "haidu#41312#gohk", "Base salt used in db to salt passwords")
+	jwtCookieName = flag.String("jwtCookieName", "jwt-auth", "The name of the JWT Cookie")
+	jwtExpirationSeconds = flag.Int("jwtExpirationSeconds", 24*60*60, "JWT expiration period in seconds")
 
 	rand.Read(jwtSecret)
 

@@ -1,4 +1,4 @@
-package xgservice
+package main
 
 import (
 	"encoding/json"

@@ -1,4 +1,4 @@
-module auth-service
+module authservice
 
 go 1.17
 
