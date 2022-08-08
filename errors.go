@@ -35,6 +35,11 @@ func sendInvalidJSON(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusBadRequest)
 }
 
+func sendUnauthorizedErr(w http.ResponseWriter, err error) {
+	log.Println(err)
+	w.WriteHeader(http.StatusUnauthorized)
+}
+
 func sendBadRequest(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusBadRequest)
 }

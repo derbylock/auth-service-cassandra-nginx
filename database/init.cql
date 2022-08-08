@@ -7,6 +7,7 @@ CREATE KEYSPACE IF NOT EXISTS xgdb
 CREATE TABLE IF NOT EXISTS xgdb.auth (
   login text,
   passwordhash text,
+  groups text,
   PRIMARY KEY (login)
 );
 

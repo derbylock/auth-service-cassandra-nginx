@@ -60,7 +60,11 @@ func runServer() {
 	router.GET("/health", getHealth)
 
 	router.POST("/auth/create", createAuth)
+	router.POST("/auth/logout", logout)
 	router.GET("/auth/check", checkAuth)
+	router.GET("/auth/checkAdmin", checkAdminAuth)
+	router.POST("/auth/users", createUser)
+	router.POST("/auth/changePassword", changePassword)
 
 	router.HandlerFunc(http.MethodGet, "/debug/pprof/", pprof.Index)
 	router.HandlerFunc(http.MethodGet, "/debug/pprof/cmdline", pprof.Cmdline)
