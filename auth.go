@@ -35,6 +35,7 @@ var jwtSecret []byte
 
 var baseSalt *string
 var jwtCookieName *string
+var jwtDomain *string
 var jwtExpirationSeconds *int
 
 func createAuth(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
@@ -50,7 +51,7 @@ func createAuth(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 
 	passwordhash := hex.EncodeToString(sha_512.Sum(nil))
 
-	records, err := session.Query(`SELECT groups FROM xgdb.auth WHERE login=? AND passwordhash=?`, authCreateRequest.Login, passwordhash).Iter().SliceMap()
+	records, err := session.Query(`SELECT groups FROM xgdb.auth WHERE login=? and passwordhash=?`, authCreateRequest.Login, passwordhash).Iter().SliceMap()
 	if err != nil {
 		sendInvalidJSON(w, err)
 		return
@@ -71,7 +72,7 @@ func createAuth(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		}
 
 		expiration := time.Now().Add(time.Duration(*jwtExpirationSeconds) * time.Second)
-		cookie := http.Cookie{Name: *jwtCookieName, Value: tokenString, Path: "/", Expires: expiration, Domain: strings.Split(r.Host, ":")[0]}
+		cookie := http.Cookie{Name: *jwtCookieName, Value: tokenString, Path: "/", Expires: expiration, Domain: *jwtDomain}
 		http.SetCookie(w, &cookie)
 		w.WriteHeader(http.StatusOK)
 		return
@@ -80,7 +81,7 @@ func createAuth(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 }
 
 func logout(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	cookie := http.Cookie{Name: *jwtCookieName, Value: "", Path: "/", MaxAge: 0, Domain: strings.Split(r.Host, ":")[0]}
+	cookie := http.Cookie{Name: *jwtCookieName, Value: "", Path: "/", MaxAge: 0, Domain: *jwtDomain}
 	http.SetCookie(w, &cookie)
 	w.WriteHeader(http.StatusOK)
 }
@@ -203,20 +204,26 @@ func changePassword(w http.ResponseWriter, r *http.Request, _ httprouter.Params)
 		return
 	}
 
-	saltedPassOld := changePasswordRequest.OldPassword + *baseSalt
+	// saltedPassOld := changePasswordRequest.OldPassword + *baseSalt
+	// sha_512 := sha512.New()
+	// sha_512.Write([]byte(saltedPassOld))
+	// oldPasswordhash := hex.EncodeToString(sha_512.Sum(nil))
+
+	saltedPass := changePasswordRequest.NewPassword + *baseSalt
 	sha_512 := sha512.New()
-	sha_512.Write([]byte(saltedPassOld))
-	oldPasswordhash := hex.EncodeToString(sha_512.Sum(nil))
+	sha_512.Write([]byte(saltedPass))
 
-	saltedPassNew := changePasswordRequest.NewPassword + *baseSalt
-	sha_512_2 := sha512.New()
-	sha_512_2.Write([]byte(saltedPassNew))
-	newPasswordhash := hex.EncodeToString(sha_512.Sum(nil))
+	passwordhash := hex.EncodeToString(sha_512.Sum(nil))
 
-	err = session.Query(`UPDATE xgdb.auth SET passwordhash=? WHERE login=? AND passwordhash=?`,
-		oldPasswordhash,
+	// saltedPassNew := changePasswordRequest.NewPassword + *baseSalt
+	// sha_512_2 := sha512.New()
+	// sha_512_2.Write([]byte(saltedPassNew))
+	// newPasswordhash := hex.EncodeToString(sha_512_2.Sum(nil))
+
+	err = session.Query(`UPDATE xgdb.auth SET passwordhash=? WHERE login=?`,
+		passwordhash,
 		changePasswordRequest.Login,
-		newPasswordhash).Consistency(gocql.Quorum).Exec()
+	).Consistency(gocql.Quorum).Exec()
 	if err != nil {
 		sendInvalidJSON(w, err)
 		return

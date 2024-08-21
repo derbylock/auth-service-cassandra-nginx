@@ -1,7 +1,7 @@
 # Multi-stage build setup (https://docs.docker.com/develop/develop-images/multistage-build/)
 
 # Stage 1 (to create a "build" image, ~850MB)
-FROM golang:1.18.4 AS builder
+FROM golang:1.20.4 AS builder
 RUN go version
 
 COPY *.go /go/src/

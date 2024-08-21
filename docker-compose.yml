@@ -14,6 +14,7 @@ services:
           memory: 2048M
         reservations:
           memory: 2048M
+      endpoint_mode: dnsrr
     environment:
       - JVM_OPTS=-Xms1024M -Xmx1024M
   auth-service-cassandra-web:
@@ -30,6 +31,7 @@ services:
           memory: 200M
         reservations:
           memory: 200M
+      endpoint_mode: dnsrr          
     entrypoint: sh -c "sleep 30 && cassandra-web --hosts `getent hosts auth-service-db | grep -oP "[0-9.]{7,25}"` --port 9042 --username admin --password admin"
     environment:
       - CASSANDRA_HOST_IPS=`dig +short auth-service-db`
@@ -41,7 +43,7 @@ services:
     container_name: auth-service
     depends_on:
       - "auth-service-db"
-    entrypoint: /root/app -build=xgcompose -cClusterHosts=auth-service-db
+    entrypoint: /root/app -build=xgcompose -cClusterHosts=auth-service-db -jwtDomain=warm2you.ru
     ports:
       - "9851:8888"
     deploy:
@@ -49,6 +51,8 @@ services:
         limits:
           memory: 500M
         reservations:
-          memory: 100M   
+          memory: 100M
+      endpoint_mode: dnsrr
 volumes:
   cassandra-db:
+   name: cassandra-db-auth

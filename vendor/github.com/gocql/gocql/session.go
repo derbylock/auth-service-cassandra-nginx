@@ -43,6 +43,7 @@ type Session struct {
 	frameObserver       FrameHeaderObserver
 	streamObserver      StreamObserver
 	hostSource          *ringDescriber
+	ringRefresher       *refreshDebouncer
 	stmtsLRU            *preparedLRU
 
 	connCfg *ConnConfig
@@ -73,8 +74,10 @@ type Session struct {
 
 	// sessionStateMu protects isClosed and isInitialized.
 	sessionStateMu sync.RWMutex
-	// isClosed is true once Session.Close is called.
+	// isClosed is true once Session.Close is finished.
 	isClosed bool
+	// isClosing bool is true once Session.Close is started.
+	isClosing bool
 	// isInitialized is true once Session.init succeeds.
 	// you can use initialized() to read the value.
 	isInitialized bool
@@ -84,14 +87,14 @@ type Session struct {
 
 var queryPool = &sync.Pool{
 	New: func() interface{} {
-		return new(Query)
+		return &Query{routingInfo: &queryRoutingInfo{}, refCount: 1}
 	},
 }
 
 func addrsToHosts(addrs []string, defaultPort int, logger StdLogger) ([]*HostInfo, error) {
 	var hosts []*HostInfo
-	for _, hostport := range addrs {
-		resolvedHosts, err := hostInfo(hostport, defaultPort)
+	for _, hostaddr := range addrs {
+		resolvedHosts, err := hostInfo(hostaddr, defaultPort)
 		if err != nil {
 			// Try other hosts if unable to resolve DNS name
 			if _, ok := err.(*net.DNSError); ok {
@@ -144,6 +147,7 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 	s.routingKeyInfoCache.lru = lru.New(cfg.MaxRoutingKeyInfo)
 
 	s.hostSource = &ringDescriber{session: s}
+	s.ringRefresher = newRefreshDebouncer(ringRefreshDebounceTime, func() error { return refreshRing(s.hostSource) })
 
 	if cfg.PoolConfig.HostSelectionPolicy == nil {
 		cfg.PoolConfig.HostSelectionPolicy = RoundRobinHostPolicy()
@@ -463,11 +467,12 @@ func (s *Session) Bind(stmt string, b func(q *QueryInfo) ([]interface{}, error))
 func (s *Session) Close() {
 
 	s.sessionStateMu.Lock()
-	defer s.sessionStateMu.Unlock()
-	if s.isClosed {
+	if s.isClosing {
+		s.sessionStateMu.Unlock()
 		return
 	}
-	s.isClosed = true
+	s.isClosing = true
+	s.sessionStateMu.Unlock()
 
 	if s.pool != nil {
 		s.pool.Close()
@@ -485,9 +490,17 @@ func (s *Session) Close() {
 		s.schemaEvents.stop()
 	}
 
+	if s.ringRefresher != nil {
+		s.ringRefresher.stop()
+	}
+
 	if s.cancel != nil {
 		s.cancel()
 	}
+
+	s.sessionStateMu.Lock()
+	s.isClosed = true
+	s.sessionStateMu.Unlock()
 }
 
 func (s *Session) Closed() bool {
@@ -617,6 +630,9 @@ func (s *Session) routingKeyInfo(ctx context.Context, stmt string) (*routingKeyI
 		return nil, nil
 	}
 
+	table := info.request.table
+	keyspace := info.request.keyspace
+
 	if len(info.request.pkeyColumns) > 0 {
 		// proto v4 dont need to calculate primary key columns
 		types := make([]TypeInfo, len(info.request.pkeyColumns))
@@ -625,16 +641,15 @@ func (s *Session) routingKeyInfo(ctx context.Context, stmt string) (*routingKeyI
 		}
 
 		routingKeyInfo := &routingKeyInfo{
-			indexes: info.request.pkeyColumns,
-			types:   types,
+			indexes:  info.request.pkeyColumns,
+			types:    types,
+			keyspace: keyspace,
+			table:    table,
 		}
 
 		inflight.value = routingKeyInfo
 		return routingKeyInfo, nil
 	}
-
-	// get the table metadata
-	table := info.request.columns[0].Table
 
 	var keyspaceMetadata *KeyspaceMetadata
 	keyspaceMetadata, inflight.err = s.KeyspaceMetadata(info.request.columns[0].Keyspace)
@@ -659,8 +674,10 @@ func (s *Session) routingKeyInfo(ctx context.Context, stmt string) (*routingKeyI
 
 	size := len(partitionKey)
 	routingKeyInfo := &routingKeyInfo{
-		indexes: make([]int, size),
-		types:   make([]TypeInfo, size),
+		indexes:  make([]int, size),
+		types:    make([]TypeInfo, size),
+		keyspace: keyspace,
+		table:    table,
 	}
 
 	for keyIndex, keyColumn := range partitionKey {
@@ -886,6 +903,7 @@ type Query struct {
 	idempotent            bool
 	customPayload         map[string][]byte
 	metrics               *queryMetrics
+	refCount              uint32
 
 	disableAutoPage bool
 
@@ -895,6 +913,18 @@ type Query struct {
 	// used by control conn queries to prevent triggering a write to systems
 	// tables in AWS MCS see
 	skipPrepare bool
+
+	// routingInfo is a pointer because Query can be copied and copyable struct can't hold a mutex.
+	routingInfo *queryRoutingInfo
+}
+
+type queryRoutingInfo struct {
+	// mu protects contents of queryRoutingInfo.
+	mu sync.RWMutex
+
+	keyspace string
+
+	table string
 }
 
 func (q *Query) defaultsFromSession() {
@@ -921,12 +951,18 @@ func (q Query) Statement() string {
 	return q.stmt
 }
 
+// Values returns the values passed in via Bind.
+// This can be used by a wrapper type that needs to access the bound values.
+func (q Query) Values() []interface{} {
+	return q.values
+}
+
 // String implements the stringer interface.
 func (q Query) String() string {
 	return fmt.Sprintf("[query statement=%q values=%+v consistency=%s]", q.stmt, q.values, q.cons)
 }
 
-//Attempts returns the number of times the query was executed.
+// Attempts returns the number of times the query was executed.
 func (q *Query) Attempts() int {
 	return q.metrics.attempts()
 }
@@ -935,7 +971,7 @@ func (q *Query) AddAttempts(i int, host *HostInfo) {
 	q.metrics.attempt(i, 0, host, false)
 }
 
-//Latency returns the average amount of nanoseconds per attempt of the query.
+// Latency returns the average amount of nanoseconds per attempt of the query.
 func (q *Query) Latency() int64 {
 	return q.metrics.latency()
 }
@@ -1084,12 +1120,21 @@ func (q *Query) Keyspace() string {
 	if q.getKeyspace != nil {
 		return q.getKeyspace()
 	}
+	if q.routingInfo.keyspace != "" {
+		return q.routingInfo.keyspace
+	}
+
 	if q.session == nil {
 		return ""
 	}
 	// TODO(chbannis): this should be parsed from the query or we should let
 	// this be set by users.
 	return q.session.cfg.Keyspace
+}
+
+// Table returns name of the table the query will be executed against.
+func (q *Query) Table() string {
+	return q.routingInfo.table
 }
 
 // GetRoutingKey gets the routing key to use for routing this query. If
@@ -1114,6 +1159,12 @@ func (q *Query) GetRoutingKey() ([]byte, error) {
 		return nil, err
 	}
 
+	if routingKeyInfo != nil {
+		q.routingInfo.mu.Lock()
+		q.routingInfo.keyspace = routingKeyInfo.keyspace
+		q.routingInfo.table = routingKeyInfo.table
+		q.routingInfo.mu.Unlock()
+	}
 	return createRoutingKey(routingKeyInfo, q.values)
 }
 
@@ -1319,17 +1370,37 @@ func (q *Query) MapScanCAS(dest map[string]interface{}) (applied bool, err error
 // cannot be reused.
 //
 // Example:
-// 		qry := session.Query("SELECT * FROM my_table")
-// 		qry.Exec()
-// 		qry.Release()
+//
+//	qry := session.Query("SELECT * FROM my_table")
+//	qry.Exec()
+//	qry.Release()
 func (q *Query) Release() {
-	q.reset()
-	queryPool.Put(q)
+	q.decRefCount()
 }
 
 // reset zeroes out all fields of a query so that it can be safely pooled.
 func (q *Query) reset() {
-	*q = Query{}
+	*q = Query{routingInfo: &queryRoutingInfo{}, refCount: 1}
+}
+
+func (q *Query) incRefCount() {
+	atomic.AddUint32(&q.refCount, 1)
+}
+
+func (q *Query) decRefCount() {
+	if res := atomic.AddUint32(&q.refCount, ^uint32(0)); res == 0 {
+		// do release
+		q.reset()
+		queryPool.Put(q)
+	}
+}
+
+func (q *Query) borrowForExecution() {
+	q.incRefCount()
+}
+
+func (q *Query) releaseAfterExecution() {
+	q.decRefCount()
 }
 
 // Iter represents an iterator that can be used to iterate over all rows that
@@ -1547,7 +1618,10 @@ func (iter *Iter) Scan(dest ...interface{}) bool {
 // custom QueryHandlers running in your C* cluster.
 // See https://datastax.github.io/java-driver/manual/custom_payloads/
 func (iter *Iter) GetCustomPayload() map[string][]byte {
-	return iter.framer.customPayload
+	if iter.framer != nil {
+		return iter.framer.customPayload
+	}
+	return nil
 }
 
 // Warnings returns any warnings generated if given in the response from Cassandra.
@@ -1648,6 +1722,9 @@ type Batch struct {
 	cancelBatch           func()
 	keyspace              string
 	metrics               *queryMetrics
+
+	// routingInfo is a pointer because Query can be copied and copyable struct can't hold a mutex.
+	routingInfo *queryRoutingInfo
 }
 
 // NewBatch creates a new batch operation without defaults from the cluster
@@ -1655,9 +1732,10 @@ type Batch struct {
 // Deprecated: use session.NewBatch instead
 func NewBatch(typ BatchType) *Batch {
 	return &Batch{
-		Type:    typ,
-		metrics: &queryMetrics{m: make(map[string]*hostMetrics)},
-		spec:    &NonSpeculativeExecution{},
+		Type:        typ,
+		metrics:     &queryMetrics{m: make(map[string]*hostMetrics)},
+		spec:        &NonSpeculativeExecution{},
+		routingInfo: &queryRoutingInfo{},
 	}
 }
 
@@ -1676,6 +1754,7 @@ func (s *Session) NewBatch(typ BatchType) *Batch {
 		keyspace:         s.cfg.Keyspace,
 		metrics:          &queryMetrics{m: make(map[string]*hostMetrics)},
 		spec:             &NonSpeculativeExecution{},
+		routingInfo:      &queryRoutingInfo{},
 	}
 
 	s.mu.RUnlock()
@@ -1700,6 +1779,11 @@ func (b *Batch) Keyspace() string {
 	return b.keyspace
 }
 
+// Batch has no reasonable eqivalent of Query.Table().
+func (b *Batch) Table() string {
+	return b.routingInfo.table
+}
+
 // Attempts returns the number of attempts made to execute the batch.
 func (b *Batch) Attempts() int {
 	return b.metrics.attempts()
@@ -1709,7 +1793,7 @@ func (b *Batch) AddAttempts(i int, host *HostInfo) {
 	b.metrics.attempt(i, 0, host, false)
 }
 
-//Latency returns the average number of nanoseconds to execute a single attempt of the batch.
+// Latency returns the average number of nanoseconds to execute a single attempt of the batch.
 func (b *Batch) Latency() int64 {
 	return b.metrics.latency()
 }
@@ -1928,6 +2012,16 @@ func createRoutingKey(routingKeyInfo *routingKeyInfo, values []interface{}) ([]b
 	return routingKey, nil
 }
 
+func (b *Batch) borrowForExecution() {
+	// empty, because Batch has no equivalent of Query.Release()
+	// that would race with speculative executions.
+}
+
+func (b *Batch) releaseAfterExecution() {
+	// empty, because Batch has no equivalent of Query.Release()
+	// that would race with speculative executions.
+}
+
 type BatchType byte
 
 const (
@@ -1961,8 +2055,10 @@ type routingKeyInfoLRU struct {
 }
 
 type routingKeyInfo struct {
-	indexes []int
-	types   []TypeInfo
+	indexes  []int
+	types    []TypeInfo
+	keyspace string
+	table    string
 }
 
 func (r *routingKeyInfo) String() string {
@@ -1975,8 +2071,8 @@ func (r *routingKeyInfoLRU) Remove(key string) {
 	r.mu.Unlock()
 }
 
-//Max adjusts the maximum size of the cache and cleans up the oldest records if
-//the new max is lower than the previous value. Not concurrency safe.
+// Max adjusts the maximum size of the cache and cleans up the oldest records if
+// the new max is lower than the previous value. Not concurrency safe.
 func (r *routingKeyInfoLRU) Max(max int) {
 	r.mu.Lock()
 	for r.lru.Len() > max {
@@ -2035,6 +2131,7 @@ func (t *traceWriter) Trace(traceId []byte) {
 		activity  string
 		source    string
 		elapsed   int
+		thread    string
 	)
 
 	t.mu.Lock()
@@ -2043,13 +2140,13 @@ func (t *traceWriter) Trace(traceId []byte) {
 	fmt.Fprintf(t.w, "Tracing session %016x (coordinator: %s, duration: %v):\n",
 		traceId, coordinator, time.Duration(duration)*time.Microsecond)
 
-	iter = t.session.control.query(`SELECT event_id, activity, source, source_elapsed
+	iter = t.session.control.query(`SELECT event_id, activity, source, source_elapsed, thread
 			FROM system_traces.events
 			WHERE session_id = ?`, traceId)
 
-	for iter.Scan(&timestamp, &activity, &source, &elapsed) {
-		fmt.Fprintf(t.w, "%s: %s (source: %s, elapsed: %d)\n",
-			timestamp.Format("2006/01/02 15:04:05.999999"), activity, source, elapsed)
+	for iter.Scan(&timestamp, &activity, &source, &elapsed, &thread) {
+		fmt.Fprintf(t.w, "%s: %s [%s] (source: %s, elapsed: %d)\n",
+			timestamp.Format("2006/01/02 15:04:05.999999"), activity, thread, source, elapsed)
 	}
 
 	if err := iter.Close(); err != nil {

@@ -117,6 +117,7 @@ func main() {
 	cPort := flag.Int("cPort", 9042, "a Cassandra cluster's port")
 	baseSalt = flag.String("baseSalt", "haidu#41312#gohk", "Base salt used in db to salt passwords")
 	jwtCookieName = flag.String("jwtCookieName", "jwt-auth", "The name of the JWT Cookie")
+	jwtDomain = flag.String("jwtDomain", "localhost", "The name of the JWT domain")
 	jwtExpirationSeconds = flag.Int("jwtExpirationSeconds", 24*60*60, "JWT expiration period in seconds")
 
 	rand.Read(jwtSecret)
