@@ -129,12 +129,22 @@ func main() {
 	cluster.Consistency = gocql.Quorum
 	cluster.Port = *cPort
 	cluster.Timeout = 30000 * time.Millisecond
-	session, _ = cluster.CreateSession()
-	defer session.Close()
-	errInitDb := initDb()
-	if errInitDb != nil {
-		log.Println(errInitDb)
-		return
+
+	initialized := false
+	for !initialized {
+	    var err error
+		session, err = cluster.CreateSession()
+		if err != nil {
+		    time.Sleep(time.Second * 3)
+			continue
+		}
+	    defer session.Close()
+	    errInitDb := initDb()
+		if errInitDb != nil {
+			log.Println(errInitDb)
+			time.Sleep(time.Second * 3)
+		}
+		initialized = true
 	}
 
 	runServer()
@@ -157,8 +167,7 @@ func applyScript(always bool, script string) (err error) {
 	for _, command := range commands {
 		if len(strings.Trim(command, " \t\r\n")) > 0 {
 			if err := session.Query(command + ";").Exec(); err != nil {
-				log.Fatal(err, command)
-				return err
+				return fmt.Errorf("session query: %w", err)
 			}
 		}
 	}
